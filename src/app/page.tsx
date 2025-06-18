@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, DragEvent, useRef } from 'react';
 
 interface ShazamTrack {
   index: string;
@@ -31,18 +31,20 @@ export default function Home() {
   const [parsedTracks, setParsedTracks] = useState<ShazamTrack[]>([]);
   const [isSearching, setIsSearching] = useState<boolean>(false);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (event.target.files) {
+    if (event.target.files && event.target.files[0]) {
       setSelectedFile(event.target.files[0]);
-      setCsvError(null); // Clear previous errors on new file selection
-      setParsedTracks([]); // Clear previous tracks
-      setSearchResults([]); // Clear previous results
+      setCsvError(null);
+      setParsedTracks([]);
+      setSearchResults([]);
     }
   };
 
   const parseCsv = (csvContent: string) => {
-    const lines = csvContent.split('\n').filter(line => line.trim() !== ''); // Filter out empty lines
+    const lines = csvContent.split('\n').filter(line => line.trim() !== '');
 
     if (lines.length < 2) {
       setCsvError('CSV file must contain at least a header and one data row.');
@@ -76,7 +78,6 @@ export default function Home() {
         });
       } else {
         console.warn(`Skipping malformed line ${i + 1}: ${linesToProcess[i]}`);
-        // Optionally, you could add an error state for malformed lines
       }
     }
 
@@ -90,9 +91,9 @@ export default function Home() {
 
   const handleParseCsv = () => {
     if (selectedFile) {
-      setCsvError(null); // Clear previous errors before parsing
-      setParsedTracks([]); // Clear previous tracks
-      setSearchResults([]); // Clear previous results
+      setCsvError(null);
+      setParsedTracks([]);
+      setSearchResults([]);
 
       const reader = new FileReader();
       reader.onload = (e) => {
@@ -113,12 +114,12 @@ export default function Home() {
 
     // Return mock results
     if (track.title.toLowerCase().includes('example')) {
-       return [
+      return [
         { title: `${track.artist} - ${track.title} (SoundCloud Remix)`, artist: track.artist, url: '#', imageUrl: '#' },
         { title: `Another version of ${track.title}`, artist: 'Various Artists', url: '#' },
       ];
     } else if (track.title.toLowerCase().includes('nomatch')) {
-       return [];
+      return [];
     } else {
       return [
         { title: `${track.artist} - ${track.title}`, artist: track.artist, url: '#', imageUrl: '#' },
@@ -140,8 +141,8 @@ export default function Home() {
         const tracksForReview: SoundCloudTrack[] = [];
 
         if (soundCloudResults.length > 0) {
-          // Check for exact match
-          const exactMatch = soundCloudResults.find(scTrack =>
+          // Check for exact match (case-insensitive and trim whitespace)
+          const exactMatch = soundCloudResults.find((scTrack) =>
             scTrack.title.trim().toLowerCase() === `${track.artist.trim()} - ${track.title.trim()}`.toLowerCase() ||
             (scTrack.title.trim().toLowerCase() === track.title.trim().toLowerCase() && scTrack.artist.trim().toLowerCase() === track.artist.trim().toLowerCase())
           );
@@ -162,10 +163,9 @@ export default function Home() {
           matchedTrack,
           soundCloudResults: tracksForReview, // Store top 3 for review
         });
-
       } catch (error) {
-        console.error(`Error searching for ${track.title} by ${track.artist}:`, error);
-        results.push({ shazamTrack: track, status: 'no_match' }); // Add with no match on error
+        console.error(`Error processing search results for ${track.title} by ${track.artist}:`, error);
+        results.push({ shazamTrack: track, status: 'no_match' });
       }
     }
 
@@ -174,25 +174,81 @@ export default function Home() {
     console.log('Search complete.');
   };
 
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragging(false);
+
+    if (event.dataTransfer.files && event.dataTransfer.files[0]) {
+      const droppedFile = event.dataTransfer.files[0];
+      if (droppedFile.name.endsWith('.csv')) {
+        setSelectedFile(droppedFile);
+        setCsvError(null);
+        setParsedTracks([]);
+        setSearchResults([]);
+      } else {
+        setCsvError('Invalid file type. Please drop a CSV file.');
+        setSelectedFile(null);
+      }
+    }
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', color: 'white', padding: '20px' }}>
       <div style={{
         background: 'linear-gradient(to right, #127cff 30%, #ff6f2a 70%)',
-        borderRadius: '30px',
-        padding: '30px 60px',
+        borderRadius: '10px',
+        padding: '10px 20px',
         marginBottom: '30px',
         color: 'white',
         fontWeight: 'bold',
-        fontSize:"20px",
+        fontSize: "20px",
         textAlign: 'center'
       }}>
         <h1>Shazam to SoundCloud App</h1>
       </div>
 
-      <input type="file" accept=".csv" onChange={handleFileChange} style={{ marginBottom: '20px' }} />
-      <button
+      <div
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        style={{
+          border: isDragging ? '2px dashed #127cff' : '2px dashed #ccc',
+          padding: '20px',
+          textAlign: 'center',
+          marginBottom: '20px',
+          width: '100%',
+          maxWidth: '400px',
+          borderRadius: '8px',
+          cursor: 'pointer'
+        }}
+        onClick={() => fileInputRef.current?.click()}
+      >
+        {selectedFile ? (
+          <p>Selected file: {selectedFile.name}</p>
+        ) : (
+          <p>Drag and drop a CSV file here or click to browse</p>
+        )}
+        <input
+          type="file"
+          accept=".csv"
+          onChange={handleFileChange}
+          style={{ display: 'none' }}
+          ref={fileInputRef}
+        />
+      </div>
+       <button
         onClick={handleParseCsv}
-        hidden={!selectedFile || isSearching}
+        disabled={!selectedFile || isSearching}
         style={{
           background: 'linear-gradient(to top, #2054ff, #01a9ff)',
           color: 'white',
@@ -207,8 +263,6 @@ export default function Home() {
       >
         {isSearching ? 'Searching...' : 'Parse CSV and Search SoundCloud'}
       </button>
-
-      {selectedFile && <p style={{ marginBottom: '10px' }}>Selected file: {selectedFile.name}</p>}
       {csvError && <p style={{ color: 'red', marginBottom: '10px' }}>Error: {csvError}</p>}
 
       {isSearching && <p style={{ marginBottom: '20px' }}>Searching for tracks on SoundCloud...</p>}
