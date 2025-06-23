@@ -9,13 +9,13 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Missing authorization code' }, { status: 400 });
   }
 
-  // State is not implemented (PKCE is enough for security)
-  // const state = req.query.state;
-
   try {
-    const tokenResponse = await fetch('https://api.soundcloud.com/oauth2/token', {
+    const codeVerifier = request.cookies.get('code_verifier')?.value;
+
+    const tokenResponse = await fetch('https://secure.soundcloud.com/oauth/token', {
       method: 'POST',
       headers: {
+        'accept' : 'application/json; charset=utf-8',
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: new URLSearchParams({
@@ -24,6 +24,7 @@ export async function GET(request: NextRequest) {
         grant_type: 'authorization_code',
         code: code,
         redirect_uri: process.env.NEXT_PUBLIC_SOUNDCLOUD_REDIRECT_URI || '',
+        code_verifier: codeVerifier || '',
       }),
     });
 
@@ -35,17 +36,14 @@ export async function GET(request: NextRequest) {
     const tokenData = await tokenResponse.json();
     const { access_token, refresh_token } = tokenData;
 
-    if (!access_token || !refresh_token) {
-      console.error('Missing access token or refresh token.');
-      return NextResponse.json({ error: 'Missing access token or refresh token' }, { status: 500 });
-    }
+    const redirectURL = new URL('/', request.url);
+    redirectURL.searchParams.set('access_token', access_token);
+    redirectURL.searchParams.set('refresh_token', refresh_token);
 
-    // TODO: Store the access_token and refresh_token securely (e.g., in a database or encrypted cookie)
-    console.log('Access Token:', access_token);
-    console.log('Refresh Token:', refresh_token);
+    const response = NextResponse.redirect(redirectURL);
+    response.cookies.delete('code_verifier');
 
-    // Redirect the user to a success page or back to the main application
-    return NextResponse.redirect(new URL('/success', request.url)); //Need a /success route
+    return response;
 
   } catch (error) {
     console.error('Error exchanging authorization code for access token:', error);

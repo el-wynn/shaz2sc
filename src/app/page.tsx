@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, DragEvent, useRef } from 'react';
+import { useState, DragEvent, useRef, useEffect } from 'react';
 
 interface ShazamTrack {
     index: string;
@@ -64,16 +64,41 @@ export default function Home() {
     const [csvError, setCsvError] = useState<string | null>(null);
     const [parsedTracks, setParsedTracks] = useState<ShazamTrack[]>([]);
     const [isSearching, setIsSearching] = useState<boolean>(false);
-    const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
     const [isDragging, setIsDragging] = useState<boolean>(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const [accessToken, setAccessToken] = useState<string | null>(null);
+    const [refreshToken, setRefreshToken] = useState<string | null>(null);
+    const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+    const [codeVerifier, setCodeVerifier] = useState<string | null>(null);
+    const [matchedTracks, setMatchedTracks] = useState<SearchResult[]>([]);
+    const [unmatchedTracks, setUnmatchedTracks] = useState<SearchResult[]>([]);
+    const [currentPage, setCurrentPage] = useState<number>(1);
+    const tracksPerPage = 20; // Constant for the number of tracks per search page
+
+    useEffect(() => {
+        // Extract access_token, refresh_token and code_verifier from URL query parameters
+        const urlParams = new URLSearchParams(window.location.search);
+        const accessTokenFromURL = urlParams.get('access_token');
+        const refreshTokenFromURL = urlParams.get('refresh_token');
+
+        if (accessTokenFromURL && refreshTokenFromURL) {
+            setAccessToken(accessTokenFromURL);
+            setRefreshToken(refreshTokenFromURL);
+            setIsAuthenticated(true);
+
+            // Clear the query parameters from the URL
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
+    }, []);
 
     const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         if (event.target.files && event.target.files[0]) {
             setSelectedFile(event.target.files[0]);
             setCsvError(null);
             setParsedTracks([]);
-            setSearchResults([]);
+            setMatchedTracks([]); // Clear previous results
+            setUnmatchedTracks([]); // Clear previous results
+            setCurrentPage(1); // Reset pagination
         }
     };
 
@@ -96,8 +121,8 @@ export default function Home() {
 
         // If header is valid, process the rest of the lines starting from index 2
         const tracks: ShazamTrack[] = [];
-        // Process only the first 5 data rows for testing (lines from index 2 to 6)
-        const linesToProcess = lines.slice(2, Math.min(lines.length, 2 + 5));
+        // Process ALL data rows starting from index 2
+        const linesToProcess = lines.slice(2);
 
         for (let i = 0; i < linesToProcess.length; i++) {
             const values = linesToProcess[i].split(',');
@@ -116,10 +141,10 @@ export default function Home() {
         }
 
         setParsedTracks(tracks);
-        console.log(`Successfully parsed ${tracks.length} tracks (first 5 data rows).`);
+        console.log(`Successfully parsed ${tracks.length} tracks.`);
 
         if (tracks.length > 0) {
-            performSearch(tracks);
+            performSearch(tracks, 1);
         }
     };
 
@@ -143,7 +168,9 @@ export default function Home() {
                 setSelectedFile(droppedFile);
                 setCsvError(null);
                 setParsedTracks([]);
-                setSearchResults([]);
+                setMatchedTracks([]); // Clear previous results
+                setUnmatchedTracks([]); // Clear previous results
+                setCurrentPage(1); // Reset pagination
             } else {
                 setCsvError('Invalid file type. Please drop a CSV file.');
                 setSelectedFile(null);
@@ -155,7 +182,9 @@ export default function Home() {
         if (selectedFile) {
             setCsvError(null);
             setParsedTracks([]);
-            setSearchResults([]);
+            setMatchedTracks([]); // Clear previous results
+            setUnmatchedTracks([]); // Clear previous results
+            setCurrentPage(1); // Reset pagination
 
             const reader = new FileReader();
             reader.onload = (e) => {
@@ -172,21 +201,63 @@ export default function Home() {
 
         const clientId = process.env.NEXT_PUBLIC_SOUNDCLOUD_CLIENT_ID;
         const redirectUri = process.env.NEXT_PUBLIC_SOUNDCLOUD_REDIRECT_URI;
-        const authorizationEndpoint = `https://api.soundcloud.com/oauth2/authorize?client_id=${clientId}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri ?? '')}&scope=non-expiring&code_challenge=${codeChallenge}&code_challenge_method=S256`;
+        const state = generateCodeVerifier(32); // Generate a random state value
 
+        const authorizationEndpoint = `https://secure.soundcloud.com/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri ?? '')}&response_type=code&code_challenge=${codeChallenge}&code_challenge_method=S256&state=${state}`;
+
+        document.cookie = `code_verifier=${codeVerifier}; path=/; max-age=3600`; // Store in cookie
         window.location.href = authorizationEndpoint;
     };
 
-    // Placeholder function for SoundCloud search
-    const searchSoundCloudForTrack = async (track: ShazamTrack): Promise<SoundCloudTrack[]> => {
-        return [];
+   const searchSoundCloudForTrack = async (track: ShazamTrack): Promise<SoundCloudTrack[]> => {
+        if (!accessToken) {
+            console.warn('Access token not available. Please authenticate with SoundCloud.');
+            return [];
+        }
+
+        const query = `${track.artist} ${track.title}`;
+        const apiUrl = `https://api.soundcloud.com/tracks?q=${encodeURIComponent(query.replace(/"+/g,''))}`;
+
+        try {
+            const response = await fetch(apiUrl, {
+                headers: {
+                    accept: `application/json; charset=utf-8`,
+                    Authorization: `Bearer ${accessToken}`,
+                },
+            });
+
+            if (!response.ok) {
+                console.error('SoundCloud API request failed:', response.status, response.statusText);
+                return [];
+            }
+
+            const data = await response.json();
+
+            // Map the API response to the SoundCloudTrack interface
+            const soundCloudResults: SoundCloudTrack[] = data.map((item: any) => ({
+                title: item.title,
+                artist: item.user.username,
+                url: item.permalink_url,
+                imageUrl: item.artwork_url || undefined,
+            }));
+
+            return soundCloudResults;
+        } catch (error) {
+            console.error('Error searching SoundCloud:', error);
+            return [];
+        }
     };
 
-    const performSearch = async (tracks: ShazamTrack[]) => {
+    const performSearch = async (tracks: ShazamTrack[], page: number) => {
         setIsSearching(true);
-        const results: SearchResult[] = [];
+        const startIndex = (page - 1) * tracksPerPage;
+        const endIndex = startIndex + tracksPerPage;
+        const tracksToProcess = tracks.slice(startIndex, endIndex);
 
-        for (const track of tracks) {
+        const currentBatchMatched: SearchResult[] = [];
+        const currentBatchUnmatched: SearchResult[] = [];
+
+        for (const track of tracksToProcess) {
             try {
                 const soundCloudResults = await searchSoundCloudForTrack(track);
                 let status: SearchResult['status'] = 'no_match';
@@ -203,29 +274,70 @@ export default function Home() {
                     if (exactMatch) {
                         status = 'matched';
                         matchedTrack = exactMatch;
+                        currentBatchMatched.push({
+                            shazamTrack: track,
+                            status,
+                            matchedTrack,
+                            soundCloudResults: [], // No review needed for matched
+                        });
                     } else {
                         // If no exact match, but results exist, mark for review (show top 3)
                         status = 'needs_review';
                         tracksForReview.push(...soundCloudResults.slice(0, 3));
+                         currentBatchUnmatched.push({
+                            shazamTrack: track,
+                            status,
+                            matchedTrack: undefined,
+                            soundCloudResults: tracksForReview, // Store top 3 for review
+                        });
                     }
+                } else {
+                     currentBatchUnmatched.push({
+                            shazamTrack: track,
+                            status: 'no_match',
+                            matchedTrack: undefined,
+                            soundCloudResults: [],
+                        });
                 }
 
-                results.push({
-                    shazamTrack: track,
-                    status,
-                    matchedTrack,
-                    soundCloudResults: tracksForReview, // Store top 3 for review
-                });
             } catch (error) {
                 console.error(`Error processing search results for ${track.title} by ${track.artist}:`, error);
-                results.push({ shazamTrack: track, status: 'no_match' });
+                 currentBatchUnmatched.push({ shazamTrack: track, status: 'no_match' });
             }
         }
 
-        setSearchResults(results);
+        setMatchedTracks(prev => [...prev, ...currentBatchMatched]);
+        setUnmatchedTracks(prev => [...prev, ...currentBatchUnmatched]);
         setIsSearching(false);
-        console.log('Search complete.');
+        console.log(`Search complete for page ${page}. Processed ${tracksToProcess.length} tracks.`);
     };
+
+    const loadNextPage = () => {
+        if ((currentPage * tracksPerPage) < parsedTracks.length && !isSearching) {
+            setCurrentPage(prevPage => prevPage + 1);
+            performSearch(parsedTracks, currentPage + 1);
+        }
+    };
+
+    // Functions for moving tracks between lists
+    const moveToUnmatched = (trackToMove: SearchResult) => {
+        setMatchedTracks(prev => prev.filter(track => track.shazamTrack.trackKey !== trackToMove.shazamTrack.trackKey));
+        // When moving to unmatched, keep the soundCloudResults if they existed, and set status to 'needs_review'
+        setUnmatchedTracks(prev => [...prev, { ...trackToMove, status: 'needs_review', matchedTrack: undefined }]);
+        console.log('Moved track to needs review:', trackToMove.shazamTrack.title);
+    };
+
+    const moveToMatched = (trackToMove: SearchResult) => {
+        setUnmatchedTracks(prev => prev.filter(track => track.shazamTrack.trackKey !== trackToMove.shazamTrack.trackKey));
+        // When moving to matched, if there were soundCloudResults, use the first one as matchedTrack.
+        // If not, or if status was 'no_match', set matchedTrack to undefined.
+        const matchedSoundCloudTrack = (trackToMove.soundCloudResults && trackToMove.soundCloudResults.length > 0)
+            ? trackToMove.soundCloudResults[0]
+            : undefined;
+        setMatchedTracks(prev => [...prev, { ...trackToMove, status: 'matched', matchedTrack: matchedSoundCloudTrack, soundCloudResults: [] }]);
+        console.log('Moved track to matched:', trackToMove.shazamTrack.title);
+    };
+
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', color: 'white', padding: '20px' }}>
@@ -241,7 +353,27 @@ export default function Home() {
             }}>
                 <h1>Shazam to SoundCloud App</h1>
             </div>
-
+            {isAuthenticated ? (
+                <img
+                    src="https://connect.soundcloud.com/2/btn-disconnect-l.png"
+                    // TODO : onClick={terminateAuth} to disconnect from SoundCloud
+                    style={{
+                        marginBottom: '20px',
+                        cursor: 'not-allowed'
+                    }}
+                    alt="Disconnect from SoundCloud"
+                ></img>
+            ) : (
+                <img
+                    src="https://connect.soundcloud.com/2/btn-connect-sc-l.png"
+                    onClick={initiateAuth}
+                    style={{
+                        marginBottom: '20px',
+                        cursor: 'pointer'
+                    }}
+                    alt="Connect to SoundCloud"
+                ></img>
+            )}
             <div
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
@@ -272,22 +404,6 @@ export default function Home() {
                 />
             </div>
             <button
-                onClick={initiateAuth}
-                style={{
-                    background: 'linear-gradient(to top, #2054ff, #01a9ff)',
-                    color: 'white',
-                    padding: '10px 20px',
-                    border: 'none',
-                    borderRadius: '5px',
-                    cursor: 'pointer',
-                    fontSize: '16px',
-                    marginBottom: '20px',
-                    opacity: 1
-                }}
-            >
-                Connect to SoundCloud
-            </button>
-            <button
                 onClick={handleParseCsv}
                 disabled={!selectedFile || isSearching}
                 style={{
@@ -296,10 +412,10 @@ export default function Home() {
                     padding: '10px 20px',
                     border: 'none',
                     borderRadius: '5px',
-                    cursor: 'pointer',
+                    cursor: (!selectedFile || isSearching) ? 'default' :'pointer',
                     fontSize: '16px',
                     marginBottom: '20px',
-                    opacity: (!selectedFile || isSearching) ? 0.6 : 1
+                    opacity: !selectedFile ? 0 : isSearching ? 0.6 : 1 // Adjusted opacity for disabled state
                 }}
             >
                 {isSearching ? 'Searching...' : 'Parse CSV and Search SoundCloud'}
@@ -308,27 +424,40 @@ export default function Home() {
 
             {isSearching && <p style={{ color: 'red', marginBottom: '20px' }}>Searching for tracks on SoundCloud...</p>}
 
-            {searchResults.length > 0 && (
-                <div style={{ width: '100%', maxWidth: '600px' }}>
-                    <h2>Search Results:</h2>
+            {/* Display Matched Tracks */}
+            {matchedTracks.length > 0 && (
+                <div style={{ width: '100%', maxWidth: '600px', marginTop: '20px' }}>
+                    <h2>Matched Tracks:</h2>
                     <ul style={{ listStyle: 'none', padding: 0 }}>
-                        {searchResults.map((result, index) => (
-                            <li key={index} style={{ marginBottom: '20px', border: '1px solid #ccc', padding: '15px', borderRadius: '8px', background: '#333' }}>
-                                <h3 style={{ marginTop: 0, marginBottom: '10px' }}>Shazam Track: {result.shazamTrack.title} by {result.shazamTrack.artist}</h3>
-                                {result.status === 'matched' && (
-                                    <div>
-                                        <p style={{ color: 'lightgreen', fontWeight: 'bold' }}>Match Found:</p>
-                                        {result.matchedTrack && (
-                                            <div style={{ marginLeft: '20px' }}>
-                                                {result.matchedTrack.title} by {result.matchedTrack.artist} (<a href={result.matchedTrack.url} target="_blank" rel="noopener noreferrer" style={{ color: 'lightblue' }}>Link</a>)
-                                            </div>
-                                        )}
+                        {matchedTracks.map((result, index) => (
+                            <li key={index} style={{ marginBottom: '10px', border: '1px solid #ccc', padding: '10px', borderRadius: '8px', background: '#333' }}>
+                                <h3 style={{ marginTop: 0, marginBottom: '5px' }}>{result.shazamTrack.title} by {result.shazamTrack.artist}</h3>
+                                <p style={{ color: 'lightgreen' }}>Match Found:</p>
+                                {result.matchedTrack && (
+                                    <div style={{ marginLeft: '20px' }}>
+                                        {result.matchedTrack.title} by {result.matchedTrack.artist} (<a href={result.matchedTrack.url} target="_blank" rel="noopener noreferrer" style={{ color: 'lightblue' }}>Link</a>)
                                     </div>
                                 )}
+                                {/* Add button to move to unmatched */}
+                                <button onClick={() => moveToUnmatched(result)} style={{ marginTop: '10px', background: '#ff6f2a', color: 'white', border: 'none', borderRadius: '4px', padding: '5px 10px', cursor: 'pointer' }}>Move to Needs Review</button>
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+
+            {/* Display Unmatched/Needs Review Tracks */}
+            {unmatchedTracks.length > 0 && (
+                <div style={{ width: '100%', maxWidth: '600px', marginTop: '20px' }}>
+                    <h2>Tracks Needing Review:</h2>
+                     <ul style={{ listStyle: 'none', padding: 0 }}>
+                        {unmatchedTracks.map((result, index) => (
+                            <li key={index} style={{ marginBottom: '10px', border: '1px solid #ccc', padding: '10px', borderRadius: '8px', background: '#333' }}>
+                                 <h3 style={{ marginTop: 0, marginBottom: '5px' }}>{result.shazamTrack.title} by {result.shazamTrack.artist}</h3>
                                 {result.status === 'needs_review' && (
                                     <div>
-                                        <p style={{ color: 'gold', fontWeight: 'bold' }}>Needs Review (Top {result.soundCloudResults?.length} Results):</p>
-                                        <ul style={{ listStyle: 'disc', paddingLeft: '40px' }}>
+                                        <p style={{ color: 'gold' }}>Needs Review (Top {result.soundCloudResults?.length} Results):</p>
+                                        <ul style={{ listStyle: 'disc', paddingLeft: '20px' }}>
                                             {result.soundCloudResults?.map((scTrack, scIndex) => (
                                                 <li key={scIndex} style={{ marginBottom: '5px' }}>
                                                     {scTrack.title} by {scTrack.artist} (<a href={scTrack.url} target="_blank" rel="noopener noreferrer" style={{ color: 'lightblue' }}>Link</a>)
@@ -339,14 +468,36 @@ export default function Home() {
                                 )}
                                 {result.status === 'no_match' && (
                                     <div>
-                                        <p style={{ color: 'salmon', fontWeight: 'bold' }}>No direct match found.</p>
+                                        <p style={{ color: 'salmon' }}>No direct match found.</p>
                                     </div>
                                 )}
+                                {/* Add button to move to matched */}
+                                <button onClick={() => moveToMatched(result)} style={{ marginTop: '10px', background: '#127cff', color: 'white', border: 'none', borderRadius: '4px', padding: '5px 10px', cursor: 'pointer' }}>Move to Matched</button>
                             </li>
                         ))}
                     </ul>
                 </div>
             )}
+
+            {/* Load More Button */}
+            {(matchedTracks.length + unmatchedTracks.length < parsedTracks.length) && !isSearching && (
+                 <button
+                    onClick={loadNextPage}
+                    style={{
+                        background: '#555',
+                        color: 'white',
+                        padding: '10px 20px',
+                        border: 'none',
+                        borderRadius: '5px',
+                        cursor: 'pointer',
+                        fontSize: '16px',
+                        marginTop: '20px',
+                    }}
+                >
+                    Load More Tracks
+                </button>
+            )}
+
         </div>
     );
 }
